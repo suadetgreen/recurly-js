@@ -1,4 +1,4 @@
-//   Recurly.js - v2.1.3
+//   Recurly.js - v2.2.9
 //
 //   Communicates with Recurly <https://recurly.com> via a JSONP API,
 //   generates UI, handles user error, and passes control to the client
@@ -43,14 +43,14 @@ function createObject(o) {
   return new F();
 };
 
-var R = {}; 
+var R = {};
 R.settings = {
   enableGeoIP: true
 , acceptedCards: ['visa', 'mastercard', 'discover', 'american_express']
 , oneErrorPerField: true
 };
 
-R.version = '2.1.3';
+R.version = '2.2.9';
 
 R.dom = {};
 
@@ -67,13 +67,12 @@ R.raiseError = function(message) {
 };
 
 
-R.config = function(settings) { 
-  $.extend(true, R.settings, settings); 
+R.config = function(settings) {
+  $.extend(true, R.settings, settings);
 
   if(!settings.baseURL) {
-    R.settings.baseURL = 'https://api.recurly.com/jsonp/'; 
     var subdomain = R.settings.subdomain || R.raiseError('company subdomain not configured');
-    R.settings.baseURL += subdomain + '/';
+    R.settings.baseURL = 'https://'+subdomain+'.recurly.com/jsonp/'+subdomain+'/';
   }
 };
 
@@ -94,7 +93,7 @@ function pluralize(count, term) {
 //
 
 (R.Cost = function(cents) {
-  this._cents = cents || 0; 
+  this._cents = cents || 0;
 }).prototype = {
   toString: function() {
     return R.formatCurrency(this.dollars());
@@ -126,7 +125,7 @@ function pluralize(count, term) {
 
 R.Cost.FREE = new R.Cost(0);
 
-(R.TimePeriod = function(length,unit) { 
+(R.TimePeriod = function(length,unit) {
     this.length = length;
     this.unit = unit;
 }).prototype = {
@@ -189,9 +188,9 @@ R.locale.errors = {
 , invalidCC: 'Invalid'
 , invalidCVV: 'Invalid'
 , invalidCoupon: 'Invalid'
-, cardDeclined: 'Transaction declined' 
-, acceptTOS: 'Please accept the Terms of Service.' 
-, invalidQuantity: 'Invalid quantity' 
+, cardDeclined: 'Transaction declined'
+, acceptTOS: 'Please accept the Terms of Service.'
+, invalidQuantity: 'Invalid quantity'
 };
 
 R.locale.currencies = {};
@@ -451,7 +450,6 @@ R.flattenErrors = function(obj, attr) {
   }
 
   for(var k in obj) {
-    // console.log(k);
     if(obj.hasOwnProperty(k)) {
       // Inherit parent attribute names when property key
       // is a numeric string; how we deal with arrays
@@ -529,9 +527,30 @@ function cc2lcu(obj) {
   }
 }
 
+function removeUndefined(obj) {
+  var ret = {};
+  for(var k in obj) {
+    var v = obj[k];
+    if($.isPlainObject(v)) {
+      ret[k] = removeUndefined(v);
+    }
+    else if(typeof v !== 'undefined') {
+      ret[k] = v;
+    }
+  }
+  return ret;
+}
 
 R.ajax = function(options) {
   options.data = $.extend({js_version: R.version}, options.data);
+  options.data = removeUndefined(options.data);
+
+  if(options.data.billing_info
+     && options.data.billing_info.payment_method == 'paypal') {
+
+     return R.paypal.start(options);
+  }
+
   return $.ajax(options);
 };
 
@@ -549,7 +568,7 @@ function errorDialog(message) {
 (R.isValidCC = function($input) {
   var v = $input.val();
 
-  // Strip out all non digits 
+  // Strip out all non digits
   v = v.replace(/\D/g, "");
 
   if(v == "") return false;
@@ -688,7 +707,7 @@ R.Plan = {
 R.AddOn = {
   fromJSON: function(json) {
     var a = createObject(R.AddOn);
-    a.name = json.name;   
+    a.name = json.name;
     a.code = json.add_on_code;
     a.cost = new R.Cost(json.default_unit_amount_in_cents);
     a.displayQuantity = json.display_quantity;
@@ -711,7 +730,7 @@ R.AddOn = {
 
 R.Account = {
   create: createObject
-, toJSON: function() {    
+, toJSON: function() {
     return {
       first_name: this.firstName
     , last_name: this.lastName
@@ -730,14 +749,10 @@ R.Account = {
 
 R.BillingInfo = {
   create: createObject
-, toJSON: function() {    
-    return {
-      first_name: this.firstName
-    , last_name: this.lastName
-    , month: this.month
-    , year: this.year
-    , number: this.number
-    , verification_value: this.cvv
+, toJSON: function() {
+    var result = {
+      first_name: this.firstName || this.account.firstName
+    , last_name: this.lastName || this.account.lastName
     , address1: this.address1
     , address2: this.address2
     , city: this.city
@@ -747,22 +762,27 @@ R.BillingInfo = {
     , phone: this.phone
     , vat_number: this.vatNumber
     };
+
+    if(this.paymentMethod == 'paypal') {
+      result.payment_method = 'paypal';
+    }
+    else {
+      $.extend(result, {
+        number: this.number
+      , verification_value: this.cvv
+      , month: this.month
+      , year: this.year
+      });
+    }
+
+    return result;
   }
-, save: function(options) { 
+, save: function(options) {
     var json = {
-      billing_info: this.toJSON() 
+      account: this.account ? this.account.toJSON() : undefined
+    , billing_info: this.toJSON()
     , signature: options.signature
     };
-
-    // Save first/last name on the account
-    // if not distinguished
-    if(!options.distinguishContactFromBillingInfo) {
-      json.account = {
-        account_code: options.accountCode
-      , first_name: this.firstName
-      , last_name: this.lastName
-      };
-    }
 
     R.ajax({
       url: R.settings.baseURL+'accounts/'+options.accountCode+'/billing_info/update'
@@ -822,9 +842,9 @@ R.Subscription = {
 
     totals.stages.now = totals.plan.add(totals.allAddOns);
 
-    // FREE TRIAL 
+    // FREE TRIAL
     if(this.plan.trial) {
-      totals.stages.now = R.Cost.FREE; 
+      totals.stages.now = R.Cost.FREE;
     }
 
     // SETUP FEE
@@ -841,7 +861,7 @@ R.Subscription = {
         discount = this.coupon.discountFixed;
       else
         discount = beforeDiscount.sub(this.plan.setupFee || 0).mult(this.coupon.discountRatio);
-      
+
       var afterDiscount = beforeDiscount.sub(discount);
 
       if(afterDiscount.cents() < 0) {
@@ -862,7 +882,7 @@ R.Subscription = {
   }
 , redeemAddOn: function(addOn) {
   var redemption = addOn.createRedemption();
-  this.addOns.push(redemption); 
+  this.addOns.push(redemption);
   return redemption;
 }
 
@@ -952,7 +972,7 @@ R.Coupon = {
     else if(json.discount_percent)
       c.discountRatio = json.discount_percent/100;
 
-    c.description = json.description;
+    c.description = json.description || '';
 
     return c;
   }
@@ -999,10 +1019,10 @@ R.Subscription.getCoupon = function(couponCode, successCallback, errorCallback) 
 R.Transaction = {
  // Note - No toJSON function for this object, all parameters must be signed.
  create: createObject
-, save: function(options) { 
+, save: function(options) {
     var json = {
-      account: this.account ? this.account.toJSON() : undefined 
-    , billing_info: this.billingInfo.toJSON() 
+      account: this.account ? this.account.toJSON() : undefined
+    , billing_info: this.billingInfo.toJSON()
     , signature: options.signature
     };
 
@@ -1046,7 +1066,7 @@ function raiseUserError(validation, elem) {
   throw e;
 }
 
-function invalidMode(e) { 
+function invalidMode(e) {
   var $input = e.element;
   var message = R.locale.errors[e.validation.errorKey];
   var validator = e.validation.validator;
@@ -1056,8 +1076,7 @@ function invalidMode(e) {
   $e.appendTo($input.parent());
 
   $input.addClass('invalid');
-  $input.bind('change keyup', function handler(e) { 
-
+  $input.bind('change keyup', function handler(e) {
     if(validator($input)) {
       $input.removeClass('invalid');
       $e.remove();
@@ -1116,7 +1135,7 @@ function pullField($form, fieldSel, validations, onError) {
     var v = validations[i];
 
     if(!v.validator($input)) {
-      onError({ 
+      onError({
         element: $input
       , validation: v
       });
@@ -1138,10 +1157,9 @@ function V(v,k) {
   };
 }
 
-
 // == SERVER ERROR UI METHODS
 
-function clearServerErrors($form) {  
+function clearServerErrors($form) {
   var $serverErrors = $form.find('.server_errors');
   $serverErrors.removeClass('any').addClass('none');
   $serverErrors.empty();
@@ -1182,11 +1200,12 @@ var preFillMap = {
   , zip:            '.billing_info > .address > .state_zip > .zip > input'
   , vatNumber:      '.billing_info > .vat_number > input'
 
-  , cardNumber:     '.billing_info  .card_number > input'
-  , CVV:      '.billing_info  .cvv > input'
+  , cardNumber:     '.billing_info > .credit_card > .card_cvv > .card_number > input'
+  , CVV:            '.billing_info > .credit_card > .card_cvv > .cvv  > input'
   }
 , subscription: {
     couponCode:     '.subscription > .coupon > .coupon_code > input'
+  , quantity:     '.subscription > .plan > .quantity > input'
   }
 };
 
@@ -1237,18 +1256,17 @@ function initCommonForm($form, options) {
     $li.find('input').focus();
   });
 
-  $form.delegate('input', 'change keyup', function() {
+  $form.delegate('input', 'change keyup init', function() {
     var $input = $(this);
-    var $li = $(this).parent(); 
+    var $li = $(this).parent();
 
     if($input.val().length > 0) {
-      $li.find('.placeholder').hide();
+      $li.find('.placeholder').css({display:'none'});
     }
     else {
-      $li.find('.placeholder').show();
+      $li.find('.placeholder').css({display:'block'});
     }
   });
-
 
   $form.delegate('input', 'focus', function() {
     $(this).parent().addClass('focus');
@@ -1263,27 +1281,27 @@ function initCommonForm($form, options) {
       $(this).parent().find('.placeholder').hide();
     }
   });
-  
+
   preFillValues($form, options, preFillMap);
 }
 
 function initContactInfoForm($form, options) {
 
   // == FIRSTNAME / LASTNAME REDUNDANCY
-  if(options.distinguishContactFromBillingInfo) { 
+  if(options.distinguishContactFromBillingInfo) {
     var $contactFirstName = $form.find('.contact_info .first_name input');
     var $contactLastName = $form.find('.contact_info .last_name input');
-    var prevFirstName = $contactFirstName.val(); 
-    var prevLastName = $contactLastName.val(); 
+    var prevFirstName = $contactFirstName.val();
+    var prevLastName = $contactLastName.val();
     $form.find('.contact_info .first_name input').change(function() {
-      var $billingFirstName = $form.find('.billing_info .first_name input'); 
+      var $billingFirstName = $form.find('.billing_info .first_name input');
       if($billingFirstName.val() == prevFirstName) {
         $billingFirstName.val( $(this).val() ).change();
       }
       prevFirstName = $contactFirstName.val();
     });
     $form.find('.contact_info .last_name input').change(function() {
-      var $billingLastName = $form.find('.billing_info .last_name input'); 
+      var $billingLastName = $form.find('.billing_info .last_name input');
       if($billingLastName.val() == prevLastName) {
         $billingLastName.val( $(this).val() ).change();
       }
@@ -1308,6 +1326,50 @@ function initBillingInfoForm($form, options) {
   var knownStates = R.states;
   var prevCountry = $countrySelect.val();
 
+  if(options.acceptedCards && options.acceptPaypal) {
+    var $method = $form.find('.payment_method');
+    var $input  = $method.find('input');
+    var $btn = $form.find('button.submit');
+    var btnText = $btn.text();
+    $method.on('click', '.payment_option', function() {
+      var $opt = $(this);
+      $method.find('.selected').removeClass('selected');
+      $opt.addClass('selected');
+
+      $method.find('input[type=radio]:checked').prop('checked', false);
+      $opt.find('input[type=radio]').prop('checked', true);
+
+      if($opt.is('.card_option')) {
+        // Show/hide is broken in jQuery 1.9
+        $form.find('.credit_card').css({display:'block'});
+        $form.find('.paypal').css({display:'none'});
+        $input.val('');
+        $btn.text(btnText);
+      }
+      else if($opt.is('.paypal_option')) {
+        $form.find('.credit_card').css({display:'none'});
+        $form.find('.paypal').css({display:'block'});
+        $input.val('paypal');
+        $btn.text(btnText + ' with PayPal');
+      }
+    });
+
+    $form.find('.payment_option').first().click();
+  }
+  else {
+    $form.find('.payment_method').removeClass('multiple');
+
+    if(options.acceptedCards) {
+      $form.find('.paypal_option').remove();
+      $form.find('.paypal').remove();
+    }
+    else if(options.acceptPaypal) {
+      $form.find('.payment_method input').val('paypal');
+      $form.find('.card_option').remove();
+      $form.find('.credit_card').remove();
+    }
+  }
+
   function matchKnownStateWithInput(country, stateStr) {
     var ref = knownStates[country];
     // Normalize stateStr
@@ -1318,7 +1380,7 @@ function initBillingInfoForm($form, options) {
       return stateStr;
     }
 
-    // Search through state names to find the code 
+    // Search through state names to find the code
     for(var k in ref) {
       if(ref.hasOwnProperty(k)) {
         var v = ref[k];
@@ -1354,7 +1416,7 @@ function initBillingInfoForm($form, options) {
         // Set known state, if provided
         if(state) $state.find('select').val(state);
       }
- 
+
     }
     else if(inSelectMode) {
       // Restore original manual state input field
@@ -1379,7 +1441,7 @@ function initBillingInfoForm($form, options) {
     if(cur && cur != '' && cur != '-') return false;
 
     // workaround
-    // 
+    //
     // this workaround is specifically for GEOIP, where data may arrive later than
     // DOM listener (it uses DOM values for VAT logic). By triggering a change event,
     // it manually triggers the DOM listener responsible for applying VAT
@@ -1389,7 +1451,7 @@ function initBillingInfoForm($form, options) {
     // but that requires a lot of time and work refactoring, and probably needs a MVVM style design
     return $jq.val(v).change();
   }
- 
+
   if(options.enableGeoIP) {
     $.ajax({
       url: R.settings.baseURL+'location',
@@ -1466,8 +1528,8 @@ function initBillingInfoForm($form, options) {
   }
   else if(options.addressRequirement == 'zip') {
     $form.find('.address').addClass('only_zip');
-    $form.find('.address1, .address2, .city, .state').remove();   
-    
+    $form.find('.address1, .address2, .city, .state').remove();
+
     // Only remove country if no VAT support
     if(!R.settings.VATPercent) {
       $form.find('.country').remove();
@@ -1475,7 +1537,7 @@ function initBillingInfoForm($form, options) {
   }
   else if(options.addressRequirement == 'zipstreet') {
     $form.find('.address').addClass('only_zipstreet');
-    $form.find('.city, .state').remove(); 
+    $form.find('.city, .state').remove();
 
     // Only remove country if no VAT support
     if(!R.settings.VATPercent) {
@@ -1485,6 +1547,10 @@ function initBillingInfoForm($form, options) {
   else if(options.addressRequirement == 'full') {
     $form.find('.address').addClass('full');
   }
+  else if(options.addressRequirement == 'only_country') {
+    $form.find('.address').addClass('only_country');
+  }
+
   // == BUILD ACCEPTED CARDS DOM
   var $acceptedCards = $form.find('.accepted_cards');
 
@@ -1513,30 +1579,35 @@ function initBillingInfoForm($form, options) {
       });
     }
     else {
-      $acceptedCards.find('.card').removeClass('match no_match'); 
+      $acceptedCards.find('.card').removeClass('match no_match');
     }
-  }); 
+  });
 }
 
 
 function pullAccountFields($form, account, options, pull) {
-  account.firstName = pull.field($form, '.contact_info .first_name', V(R.isNotEmpty)); 
-  account.lastName = pull.field($form, '.contact_info .last_name', V(R.isNotEmpty)); 
-  account.companyName = pull.field($form, '.contact_info .company_name'); 
-  account.email = pull.field($form, '.email', V(R.isNotEmpty), V(R.isValidEmail)); 
-  account.code = options.accountCode || 
+  account.firstName = pull.field($form, '.contact_info .first_name', V(R.isNotEmpty));
+  account.lastName = pull.field($form, '.contact_info .last_name', V(R.isNotEmpty));
+  account.companyName = pull.field($form, '.contact_info .company_name');
+  account.email = pull.field($form, '.email', V(R.isNotEmpty), V(R.isValidEmail));
+  account.code = options.accountCode ||
     (options.account && (options.account.code || options.account.accountCode));
 }
 
 
 function pullBillingInfoFields($form, billingInfo, options, pull) {
-  billingInfo.firstName = pull.field($form, '.billing_info .first_name', V(R.isNotEmpty)); 
-  billingInfo.lastName = pull.field($form, '.billing_info .last_name', V(R.isNotEmpty)); 
-  billingInfo.number = pull.field($form, '.card_number', V(R.isNotEmpty), V(R.isValidCC)); 
-  billingInfo.cvv = pull.field($form, '.cvv', V(R.isNotEmpty), V(R.isValidCVV)); 
 
-  billingInfo.month = pull.field($form, '.month');
-  billingInfo.year = pull.field($form, '.year');
+  billingInfo.paymentMethod = pull.field($form, '.payment_method');
+
+  if(billingInfo.paymentMethod !== 'paypal') {
+    billingInfo.firstName = pull.field($form, '.billing_info .first_name', V(R.isNotEmpty));
+    billingInfo.lastName = pull.field($form, '.billing_info .last_name', V(R.isNotEmpty));
+
+    billingInfo.number = pull.field($form, '.card_number', V(R.isNotEmpty), V(R.isValidCC));
+    billingInfo.cvv = pull.field($form, '.cvv', V(R.isNotEmpty), V(R.isValidCVV));
+    billingInfo.month = pull.field($form, '.month');
+    billingInfo.year = pull.field($form, '.year');
+  }
 
   billingInfo.phone = pull.field($form, '.phone');
   billingInfo.address1 = pull.field($form, '.address1', V(R.isNotEmpty));
@@ -1556,33 +1627,49 @@ function pullPlanQuantity($form, plan, options, pull) {
 
 
 function verifyTOSChecked($form, pull) {
-  pull.field($form, '.accept_tos', V(R.isChecked)); 
+  pull.field($form, '.accept_tos', V(R.isChecked));
 }
 
-
+R.buildBillingInfoForm =
 R.buildBillingInfoUpdateForm = function(options) {
   var defaults = {
     addressRequirement: 'full'
-  , distinguishContactFromBillingInfo: true 
+  , collectContactInfo: false
+  , distinguishContactFromBillingInfo: true
   };
+
+  // Backwards compatibility with old callback
+  options.successHandler = options.successHandler || options.afterUpdate;
 
   options = $.extend(createObject(R.settings), defaults, options);
 
   if(!options.accountCode) R.raiseError('accountCode missing');
   if(!options.signature) R.raiseError('signature missing');
 
-  var billingInfo = R.BillingInfo.create();
+  var billingInfo = R.BillingInfo.create(),
+      account = R.Account.create();
+
+  billingInfo.account = account;
 
   var $form = $(R.dom.update_billing_info_form);
+
+  if(options.collectContactInfo) {
+    $form.find('.contact_info').html(R.dom.contact_info_fields);
+  }
+  else {
+    $form.find('.contact_info').remove();
+  }
+
   $form.find('.billing_info').html(R.dom.billing_info_fields);
 
 
   initCommonForm($form, options);
+  initContactInfoForm($form, options);
   initBillingInfoForm($form, options);
 
 
   $form.submit(function(e) {
-    e.preventDefault(); 
+    e.preventDefault();
 
     clearServerErrors($form);
 
@@ -1591,9 +1678,11 @@ R.buildBillingInfoUpdateForm = function(options) {
 
     validationGroup(function(puller) {
       pullBillingInfoFields($form, billingInfo, options, puller);
+      pullAccountFields($form, account, options, puller);
     }
     , function() {
       $form.addClass('submitting');
+      var prevText = $form.find('button.submit').text();
       $form.find('button.submit').attr('disabled', true).text('Please Wait');
 
       billingInfo.save({
@@ -1617,7 +1706,7 @@ R.buildBillingInfoUpdateForm = function(options) {
         }
       , complete: function() {
           $form.removeClass('submitting');
-          $form.find('button.submit').removeAttr('disabled').text('Update');
+          $form.find('button.submit').removeAttr('disabled').text(prevText);
         }
       });
     });
@@ -1644,7 +1733,7 @@ function initTOSCheck($form, options) {
   if(options.termsOfServiceURL || options.privacyPolicyURL) {
     var $tos = $form.find('.accept_tos').html(R.dom.terms_of_service);
 
-    // If only one, remove 'and' 
+    // If only one, remove 'and'
     if(!(options.termsOfServiceURL && options.privacyPolicyURL)) {
       $tos.find('span.and').remove();
     }
@@ -1669,7 +1758,7 @@ function initTOSCheck($form, options) {
   else {
     $form.find('.accept_tos').remove();
   }
-  
+
 }
 
 R.buildTransactionForm = function(options) {
@@ -1679,8 +1768,10 @@ R.buildTransactionForm = function(options) {
   , collectContactInfo: true
   };
 
-  options = $.extend(createObject(R.settings), defaults, options);
+  // Backwards compatibility with old callback
+  options.successHandler = options.successHandler || options.afterPay;
 
+  options = $.extend(createObject(R.settings), defaults, options);
 
   if(!options.collectContactInfo && !options.accountCode) {
     R.raiseError('collectContactInfo is false, but no accountCode provided');
@@ -1693,14 +1784,13 @@ R.buildTransactionForm = function(options) {
   ,   account = R.Account.create()
   ,   transaction = R.Transaction.create();
 
-
+  billingInfo.account = account;
   transaction.account = account;
   transaction.billingInfo = billingInfo;
   transaction.currency = options.currency;
   transaction.cost = new R.Cost(options.amountInCents);
 
   var $form = $(R.dom.one_time_transaction_form);
-  $form.find('.billing_info').html(R.dom.billing_info_fields);
 
   if(options.collectContactInfo) {
     $form.find('.contact_info').html(R.dom.contact_info_fields);
@@ -1709,14 +1799,15 @@ R.buildTransactionForm = function(options) {
     $form.find('.contact_info').remove();
   }
 
+  $form.find('.billing_info').html(R.dom.billing_info_fields);
 
   initCommonForm($form, options);
-  initContactInfoForm($form, options);
   initBillingInfoForm($form, options);
+  initContactInfoForm($form, options);
   initTOSCheck($form, options);
 
   $form.submit(function(e) {
-    e.preventDefault(); 
+    e.preventDefault();
 
     clearServerErrors($form);
 
@@ -1730,6 +1821,7 @@ R.buildTransactionForm = function(options) {
     }
     , function() {
       $form.addClass('submitting');
+      var prevText = $form.find('button.submit').text();
       $form.find('button.submit').attr('disabled', true).text('Please Wait');
 
       transaction.save({
@@ -1752,7 +1844,7 @@ R.buildTransactionForm = function(options) {
         }
       , complete: function() {
           $form.removeClass('submitting');
-          $form.find('button.submit').removeAttr('disabled').text('Pay');
+          $form.find('button.submit').removeAttr('disabled').text(prevText);
         }
       });
     });
@@ -1770,33 +1862,41 @@ R.buildTransactionForm = function(options) {
       options.afterInject($form.get(0));
     }
   });
-
 };
-
 
 R.buildSubscriptionForm = function(options) {
   var defaults = {
     enableAddOns: true
   , enableCoupons: true
   , addressRequirement: 'full'
+  , collectContactInfo: true
   , distinguishContactFromBillingInfo: false
   };
+
+  // Backwards compatibility with old callback
+  options.successHandler = options.successHandler || options.afterSubscribe;
 
   options = $.extend(createObject(R.settings), defaults, options);
 
   if(!options.signature) R.raiseError('signature missing');
 
   var $form = $(R.dom.subscribe_form);
-  $form.find('.contact_info').html(R.dom.contact_info_fields);
-  $form.find('.billing_info').html(R.dom.billing_info_fields);
 
+  if(options.collectContactInfo) {
+    $form.find('.contact_info').html(R.dom.contact_info_fields);
+  }
+  else {
+    $form.find('.contact_info').remove();
+  }
+
+  $form.find('.billing_info').html(R.dom.billing_info_fields);
 
   if(options.planCode)
     R.Plan.get(options.planCode, options.currency, gotPlan);
   else if(options.plan) {
     // this should never be called
     // the api does not have it, nor does anywhere else in the program refer to it
-    gotPlan(options.plan);    
+    gotPlan(options.plan);
   }
 
   initCommonForm($form, options);
@@ -1807,7 +1907,7 @@ R.buildSubscriptionForm = function(options) {
   function gotPlan(plan) {
 
     if(options.filterPlan)
-      plan = options.filterPlan(plan) || plan; 
+      plan = options.filterPlan(plan) || plan;
 
 
     var subscription = plan.createSubscription(),
@@ -1816,9 +1916,11 @@ R.buildSubscriptionForm = function(options) {
 
     subscription.account = account;
     subscription.billingInfo = billingInfo;
+    billingInfo.account = account;
+    billingInfo.subscription = subscription;
 
     if(options.filterSubscription)
-      subscription = options.filterSubscription(subscription) || subscription; 
+      subscription = options.filterSubscription(subscription) || subscription;
 
     // == EDITABLE PLAN QUANTITY
     if(!plan.displayQuantity) {
@@ -1833,7 +1935,7 @@ R.buildSubscriptionForm = function(options) {
     else {
       $form.find('.plan .setup_fee').remove();
     }
-    
+
     // == FREE TRIAL
     if(plan.trial) {
       $form.find('.subscription').addClass('with_trial');
@@ -1843,7 +1945,7 @@ R.buildSubscriptionForm = function(options) {
     else {
       $form.find('.plan .free_trial').remove();
     }
- 
+
 
     // == UPDATE ALL UI TOTALS via subscription.calculateTotals() results
     function updateTotals() {
@@ -1894,7 +1996,7 @@ R.buildSubscriptionForm = function(options) {
           '<div class="name">'+addOn.name+'</div>' +
           '<div class="field quantity">' +
             '<div class="placeholder">Qty</div>' +
-            '<input type="text">' +
+            '<input type="text" value="1">' +
           '</div>' +
           '<div class="cost"/>' +
           '</div>');
@@ -1906,12 +2008,26 @@ R.buildSubscriptionForm = function(options) {
         }
 
         // Quantity Change
-        $addOnsList.delegate('.add_ons .quantity input', 'change keyup', function(e) { 
-          var $addOn = $(this).closest('.add_on');
+        $addOnsList.delegate('.quantity input', 'change keyup recalculate', function(e) {
+          var $qty = $(this);
+          var $addOn = $qty.closest('.add_on');
           var addOn = $addOn.data('add_on');
-          var newQty = parseInt($(this).val(),10) || 1;
-          subscription.findAddOnByCode(addOn.code).quantity = newQty;
+          var newQty = $qty.val() === '' ? 1 : parseInt($qty.val(), 10);
+
+          subscription.findAddOnByCode(addOn.code).quantity = newQty > 0 ? newQty : 0;
           updateTotals();
+        });
+
+        $addOnsList.delegate('.quantity input', 'blur', function(e) {
+          var $qty = $(this);
+          var $addOn = $qty.closest('.add_on');
+          var newQty = parseInt($qty.val(), 10);
+          if (newQty < 1) {
+            $qty.trigger('recalculate');
+          }
+          if (newQty === 0) {
+            $addOn.trigger('actuate');
+          }
         });
 
         $addOnsList.bind('selectstart', function(e) {
@@ -1921,7 +2037,7 @@ R.buildSubscriptionForm = function(options) {
         });
 
         // Add-on click
-        $addOnsList.delegate('.add_ons .add_on', 'click', function(e) {
+        $addOnsList.delegate('.add_on', 'click actuate', function(e) {
           if($(e.target).closest('.quantity').length) return;
 
           var selected = !$(this).hasClass('selected');
@@ -1933,7 +2049,12 @@ R.buildSubscriptionForm = function(options) {
             // add
             var sa = subscription.redeemAddOn(addOn);
             var $qty = $(this).find('.quantity input');
-            sa.quantity = parseInt($qty.val(),10) || 1;
+            var qty = parseInt($qty.val(), 10);
+            if (qty < 1 || isNaN(qty)) {
+              qty = 1;
+              $qty.val(qty);
+            }
+            sa.quantity = qty;
             $qty.focus();
           }
           else {
@@ -1943,14 +2064,16 @@ R.buildSubscriptionForm = function(options) {
 
           updateTotals();
         });
+
+        $addOnsList.find('input').trigger('init');
       }
     }
     else {
       $addOnsList.remove();
     }
-    
+
     // == COUPON REDEEMER
-    var $coupon = $form.find('.coupon'); 
+    var $coupon = $form.find('.coupon');
     var lastCode = null;
 
     function updateCoupon() {
@@ -2009,6 +2132,7 @@ R.buildSubscriptionForm = function(options) {
       });
 
       $coupon.find('input').blur(function() { $coupon.find('.check').click(); });
+
     }
     else {
       $coupon.remove();
@@ -2016,12 +2140,12 @@ R.buildSubscriptionForm = function(options) {
 
 
     // == VAT
-    var $vat = $form.find('.vat'); 
+    var $vat = $form.find('.vat');
     var $vatNumber = $form.find('.vat_number');
     var $vatNumberInput = $vatNumber.find('input');
 
     $vat.find('.title').text('VAT at ' + R.settings.VATPercent + '%');
-    function showHideVAT() { 
+    function showHideVAT() {
       var buyerCountry = $form.find('.country select').val();
       var vatNumberApplicable = R.isVATNumberApplicable(buyerCountry);
 
@@ -2047,14 +2171,14 @@ R.buildSubscriptionForm = function(options) {
       updateTotals();
       showHideVAT();
     });
- 
+
     // SUBMIT HANDLER
     $form.submit(function(e) {
-      e.preventDefault(); 
+      e.preventDefault();
 
       clearServerErrors($form);
 
-      
+
       $form.find('.error').remove();
       $form.find('.invalid').removeClass('invalid');
 
@@ -2066,20 +2190,20 @@ R.buildSubscriptionForm = function(options) {
       }, function() {
 
         $form.addClass('submitting');
+        var prevText = $form.find('button.submit').text();
         $form.find('button.submit').attr('disabled', true).text('Please Wait');
 
         subscription.save({
-
-        signature: options.signature
-        ,   success: function(response) {
-              if(options.successHandler) {
-                options.successHandler(R.getToken(response));
-              }
-              if(options.successURL) {
-                var url = options.successURL;
-                R.postResult(url, response, options);
-              }
+          signature: options.signature
+        , success: function(response) {
+            if(options.successHandler) {
+              options.successHandler(R.getToken(response));
             }
+            if(options.successURL) {
+              var url = options.successURL;
+              R.postResult(url, response, options);
+            }
+          }
         , error: function(errors) {
             if(!options.onError || !options.onError(errors)) {
               displayServerErrors($form, errors);
@@ -2087,12 +2211,14 @@ R.buildSubscriptionForm = function(options) {
           }
         , complete: function() {
             $form.removeClass('submitting');
-            $form.find('button.submit').removeAttr('disabled').text('Subscribe');
+            $form.find('button.submit').removeAttr('disabled').text(prevText);
           }
         });
       });
 
     });
+
+    updateCoupon();
 
     // FINALLY - UPDATE INITIAL TOTALS AND INJECT INTO DOM
     updateTotals();
@@ -2109,11 +2235,68 @@ R.buildSubscriptionForm = function(options) {
         options.afterInject($form.get(0));
       }
     });
-
   }
-
 };
 
+R.paypal = {
+  start: function(opts) {
+    var originalWindowName = window.name;
+
+    // Very rare edge case of window getting stuck with a prior recurly_result in it.
+    if(originalWindowName.indexOf('recurly_result') > -1) {
+      window.name = '';
+      originalWindowName = '';
+    }
+
+    var data = $.extend(opts.data, {
+        post_message: true,
+        referer: window.location.href
+      })
+      , url = opts.url + '?' + $.param(data)
+      , popup = window.open(url, 'recurly_paypal', 'menubar=1,resizable=1');
+
+      window.popup = popup;
+
+    $(window).on('message', handleMessage);
+
+
+    var interval = setInterval(function() {
+      var decoded = decodeURIComponent(window.name)
+        , match = decoded.match(/recurly_result=(.*)[&$]?/)
+        , result = match && $.parseJSON(match[1]);
+
+      if(result) {
+        finish(result);
+        window.name = originalWindowName;
+      }
+
+    }, 1000);
+
+
+    function finish(result) {
+      try {
+        popup.close();
+      }
+      finally {
+        opts.success(result);
+        opts.complete();
+        $(window).unbind('message', handleMessage);
+        clearInterval(interval);
+      }
+    }
+
+    function handleMessage(e) {
+      var api = document.createElement('a');
+      api.href = R.settings.baseURL;
+
+       var origin = api.protocol + '//' + api.host.replace(/:\d+$/, '');
+
+       if (e.originalEvent.origin == origin) {
+         finish(e.originalEvent.data);
+       }
+    }
+  }
+};
 
 
 //////////////////////////////////////////////////
@@ -2124,62 +2307,64 @@ R.states = {};
 R.states.US = {
   "-": "Select State"
 , "--": "------------"
-, "AK": "Alaska"
 , "AL": "Alabama"
-, "AP": "Armed Forces Pacific"
-, "AR": "Arkansas"
+, "AK": "Alaska"
 , "AS": "American Samoa"
 , "AZ": "Arizona"
+, "AR": "Arkansas"
+, "AA": "Armed Forces Americas"
+, "AE": "Armed Forces Europe, Middle East, &amp; Canada"
+, "AP": "Armed Forces Pacific"
 , "CA": "California"
 , "CO": "Colorado"
 , "CT": "Connecticut"
-, "DC": "District of Columbia"
 , "DE": "Delaware"
-, "FL": "Florida"
+, "DC": "District of Columbia"
 , "FM": "Federated States of Micronesia"
+, "FL": "Florida"
 , "GA": "Georgia"
 , "GU": "Guam"
 , "HI": "Hawaii"
-, "IA": "Iowa"
 , "ID": "Idaho"
 , "IL": "Illinois"
 , "IN": "Indiana"
+, "IA": "Iowa"
 , "KS": "Kansas"
 , "KY": "Kentucky"
 , "LA": "Louisiana"
-, "MA": "Massachusetts"
-, "MD": "Maryland"
 , "ME": "Maine"
 , "MH": "Marshall Islands"
+, "MD": "Maryland"
+, "MA": "Massachusetts"
 , "MI": "Michigan"
 , "MN": "Minnesota"
-, "MO": "Missouri"
-, "MP": "Northern Mariana Islands"
 , "MS": "Mississippi"
+, "MO": "Missouri"
 , "MT": "Montana"
-, "NC": "North Carolina"
-, "ND": "North Dakota"
 , "NE": "Nebraska"
+, "NV": "Nevada"
 , "NH": "New Hampshire"
 , "NJ": "New Jersey"
 , "NM": "New Mexico"
-, "NV": "Nevada"
 , "NY": "New York"
+, "NC": "North Carolina"
+, "ND": "North Dakota"
+, "MP": "Northern Mariana Islands"
 , "OH": "Ohio"
 , "OK": "Oklahoma"
 , "OR": "Oregon"
+, "PW": "Palau"
 , "PA": "Pennsylvania"
 , "PR": "Puerto Rico"
-, "PW": "Palau"
 , "RI": "Rhode Island"
 , "SC": "South Carolina"
 , "SD": "South Dakota"
 , "TN": "Tennessee"
 , "TX": "Texas"
 , "UT": "Utah"
-, "VA": "Virginia"
-, "VI": "Virgin Islands"
 , "VT": "Vermont"
+, "VI": "Virgin Islands"
+, "VA": "Virginia"
 , "WA": "Washington"
 , "WV": "West Virginia"
 , "WI": "Wisconsin"
@@ -2194,16 +2379,14 @@ R.states.CA = {
 , "MB": "Manitoba"
 , "NB": "New Brunswick"
 , "NL": "Newfoundland"
+, "NT": "Northwest Territories"
 , "NS": "Nova Scotia"
 , "NU": "Nunavut"
 , "ON": "Ontario"
 , "PE": "Prince Edward Island"
 , "QC": "Quebec"
 , "SK": "Saskatchewan"
-, "NT": "Northwest Territories"
 , "YT": "Yukon Territory"
-, "AA": "Armed Forces Americas"
-, "AE": "Armed Forces Europe, Middle East, &amp; Canada"
 };
 
 
@@ -2231,7 +2414,7 @@ R.dom['subscribe_form'] = '<form class="recurly subscribe"><!--[if lt IE 7]><div
 // Compiled from src/dom/update_billing_info_form.jade
 //////////////////////////////////////////////////
 
-R.dom['update_billing_info_form'] = '<form class="recurly update_billing_info"><div class="server_errors none"></div><div class="billing_info"></div><div class="footer"><button type="submit" class="submit">Update</button></div></form>';
+R.dom['update_billing_info_form'] = '<form class="recurly update_billing_info"><div class="server_errors none"></div><div class="contact_info"></div><div class="billing_info"></div><div class="footer"><button type="submit" class="submit">Update</button></div></form>';
 
 //////////////////////////////////////////////////
 // Compiled from src/dom/one_time_transaction_form.jade
